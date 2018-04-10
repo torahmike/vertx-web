@@ -27,7 +27,7 @@ import java.util.concurrent.CountDownLatch;
  */
 public class OpenAPI3SchemasTest extends WebTestValidationBase {
 
-  final String OAS_PATH = "./src/test/resources/swaggers/schemas_test_spec.yaml";
+  final String OAS_PATH = "swaggers/schemas_test_spec.yaml";
 
   OpenAPI3RouterFactory routerFactory;
   HttpServer schemaServer;
@@ -165,16 +165,14 @@ public class OpenAPI3SchemasTest extends WebTestValidationBase {
     routerFactory.addHandlerByOperationId("test2", handler);
     startServer();
     assertRequestOk("/test2", "test2_ok.json");
-    assertRequestFail("/test2", "test2_fail_1.json");
-    assertRequestFail("/test2", "test2_fail_2.json");
-    assertRequestFail("/test2", "test2_fail_3.json");
+    assertRequestFail("/test2", "test2_fail.json");
   }
 
   @Test
   public void test3() throws Exception {
     routerFactory.addHandlerByOperationId("test3", handler);
     startServer();
-    assertRequestOk("/test3", "test2_ok.json"); // Same as test2
+    assertRequestOk("/test3", "test2_ok.json");
     assertRequestFail("/test3", "test2_fail_1.json");
     assertRequestFail("/test3", "test2_fail_2.json");
     assertRequestFail("/test3", "test2_fail_3.json");
@@ -268,7 +266,7 @@ public class OpenAPI3SchemasTest extends WebTestValidationBase {
   }
 
   @Test
-  @Ignore
+  @Ignore // We don't have yet the default support
   public void test13() throws Exception {
     routerFactory.addHandlerByOperationId("test13", handler);
     startServer();

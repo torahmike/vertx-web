@@ -27,9 +27,7 @@ paths:
         content:
           application/json:
             schema:
-              allOf:
-                - $ref: '#/components/schemas/Person'
-                - $ref: '#/components/schemas/Citizen'
+              $ref: "./swaggers/schemas/Card_id.yaml"
   /test3:
     post:
       operationId: test3
