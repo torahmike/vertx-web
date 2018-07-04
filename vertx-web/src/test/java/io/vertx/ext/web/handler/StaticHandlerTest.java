@@ -33,6 +33,7 @@ import io.vertx.ext.web.WebTestBase;
 import org.junit.Test;
 
 import java.io.File;
+import java.nio.file.Files;
 import java.text.DateFormat;
 import java.util.List;
 import java.util.ArrayList;
@@ -321,6 +322,28 @@ public class StaticHandlerTest extends WebTestBase {
     testRequest(HttpMethod.GET, "/otherpage.html", req -> req.putHeader("if-modified-since", dateTimeFormatter.format(toDateTime(lastModifiedRef.get()) - 1)), res -> {
     }, 200, "OK", "<html><body>Other page</body></html>");
   }
+  
+  @Test
+  public void testCacheNotOverwritingCacheControlHeaderValues() throws Exception {
+    router.clear();
+    router.route().order(0).handler(context -> {
+      context.response().putHeader("cache-control", "test1");
+      context.response().putHeader("last-modified", "test2");
+      context.response().putHeader("vary", "test3");
+      
+      context.next();
+    });
+    router.route().order(2).handler(stat);
+    
+    testRequest(HttpMethod.GET, "/otherpage.html", req -> req.putHeader("accept-encoding", "gzip"), res -> {
+      String cacheControl = res.headers().get("cache-control");
+      String lastModified = res.headers().get("last-modified");
+      String vary = res.headers().get("vary");
+      assertEquals("test1", cacheControl);
+      assertEquals("test2", lastModified);
+      assertEquals("test3", vary);
+    }, 200, "OK", "<html><body>Other page</body></html>");
+  }
 
   @Test
   public void testSendVaryAcceptEncodingHeader() throws Exception {
@@ -399,39 +422,68 @@ public class StaticHandlerTest extends WebTestBase {
 
   @Test
   public void testCacheFilesEntryOld() throws Exception {
+	String webroot = "src/test/filesystemwebroot", page = "/fspage.html";
+	File resource = new File(webroot + page);
+	String html = new String(Files.readAllBytes(resource.toPath()));
+	int cacheEntryTimeout = 100;
+
     stat.setFilesReadOnly(false);
-    stat.setWebRoot("src/test/filesystemwebroot");
-    stat.setCacheEntryTimeout(2000);
-    File resource = new File("src/test/filesystemwebroot", "fspage.html");
+    stat.setWebRoot(webroot);
+    stat.setCacheEntryTimeout(cacheEntryTimeout);
+
     long modified = Utils.secondsFactor(resource.lastModified());
-    testRequest(HttpMethod.GET, "/fspage.html", null, res -> {
+    testRequest(HttpMethod.GET, page, null, res -> {
       String lastModified = res.headers().get("last-modified");
       assertEquals(modified, toDateTime(lastModified));
       // Now update the web resource
       resource.setLastModified(modified + 1000);
-    }, 200, "OK", "<html><body>File system page</body></html>");
+    }, 200, "OK", html);
     // But it should return a new entry as the entry is now old
-    Thread.sleep(2001);
-    testRequest(HttpMethod.GET, "/fspage.html", req -> req.putHeader("if-modified-since", dateTimeFormatter.format(modified)), res -> {
+    Thread.sleep(cacheEntryTimeout + 1);
+    testRequest(HttpMethod.GET, page, req -> req.putHeader("if-modified-since", dateTimeFormatter.format(modified)), res -> {
       String lastModified = res.headers().get("last-modified");
       assertEquals(modified + 1000, toDateTime(lastModified));
-    }, 200, "OK", "<html><body>File system page</body></html>");
+    }, 200, "OK", html);
+
+    // 304 must still work when cacheEntry.isOutOfDate() == true, https://github.com/vert-x3/vertx-web/issues/726
+    Thread.sleep(cacheEntryTimeout + 1);
+
+    testRequest(HttpMethod.GET, page, req -> req.putHeader("if-modified-since", dateTimeFormatter.format(modified + 1000)), 304, "Not Modified", null);
+  }
+
+  @Test
+  public void testCacheFilesFileDeleted() throws Exception {
+    File webroot = new File(".vertx/webroot"), pageFile = new File(webroot, "deleted.html");
+    if (!pageFile.exists()) {
+      webroot.mkdirs();
+      pageFile.createNewFile();
+    }
+    String page = '/' + pageFile.getName();
+
+    stat.setFilesReadOnly(false);
+    stat.setWebRoot(webroot.getPath());
+    stat.setCacheEntryTimeout(3600 * 1000);
+
+    long modified = Utils.secondsFactor(pageFile.lastModified());
+    testRequest(HttpMethod.GET, page, req -> req.putHeader("if-modified-since", dateTimeFormatter.format(modified)), null, 304, "Not Modified", null);
+    pageFile.delete();
+    testRequest(HttpMethod.GET, page, 404, "Not Found");
+    testRequest(HttpMethod.GET, page, req -> req.putHeader("if-modified-since", dateTimeFormatter.format(modified)), null, 404, "Not Found", null);
+
   }
 
   @Test
   public void testDirectoryListingText() throws Exception {
     stat.setDirectoryListing(true);
     Set<String> expected = new HashSet<>(Arrays.asList(".hidden.html", "a", "foo.json", "index.html", "otherpage.html", "somedir", "somedir2", "somedir3", "file with spaces.html"));
-    testRequest(HttpMethod.GET, "/", null, resp -> {
-      resp.bodyHandler(buff -> {
-        String sBuff = buff.toString();
-        String[] elems = sBuff.split("\n");
-        assertEquals(expected.size(), elems.length);
-        for (String elem : elems) {
-          assertTrue(expected.contains(elem));
-        }
-      });
-    }, 200, "OK", null);
+    testRequest(HttpMethod.GET, "/", null, resp -> resp.bodyHandler(buff -> {
+      String sBuff = buff.toString();
+      String[] elems = sBuff.split("\n");
+      assertEquals(expected.size(), elems.length);
+      for (String elem : elems) {
+        assertTrue(expected.contains(elem));
+      }
+    }), 200, "OK", null);
   }
 
   @Test
@@ -439,37 +491,31 @@ public class StaticHandlerTest extends WebTestBase {
     stat.setDirectoryListing(true);
     stat.setIncludeHidden(false);
     Set<String> expected = new HashSet<>(Arrays.asList("foo.json", "a", "index.html", "otherpage.html", "somedir", "somedir2", "somedir3", "file with spaces.html"));
-    testRequest(HttpMethod.GET, "/", null, resp -> {
-      resp.bodyHandler(buff -> {
-        assertEquals("text/plain", resp.headers().get("content-type"));
-        String sBuff = buff.toString();
-        String[] elems = sBuff.split("\n");
-        assertEquals(expected.size(), elems.length);
-        for (String elem: elems) {
-          assertTrue(expected.contains(elem));
-        }
-      });
-    }, 200, "OK", null);
+    testRequest(HttpMethod.GET, "/", null, resp -> resp.bodyHandler(buff -> {
+      assertEquals("text/plain", resp.headers().get("content-type"));
+      String sBuff = buff.toString();
+      String[] elems = sBuff.split("\n");
+      assertEquals(expected.size(), elems.length);
+      for (String elem: elems) {
+        assertTrue(expected.contains(elem));
+      }
+    }), 200, "OK", null);
   }
 
   @Test
   public void testDirectoryListingJson() throws Exception {
     stat.setDirectoryListing(true);
     Set<String> expected = new HashSet<>(Arrays.asList(".hidden.html", "foo.json", "index.html", "otherpage.html", "a", "somedir", "somedir2", "somedir3", "file with spaces.html"));
-    testRequest(HttpMethod.GET, "/", req -> {
-      req.putHeader("accept", "application/json");
-    }, resp -> {
-      resp.bodyHandler(buff -> {
-        assertEquals("application/json", resp.headers().get("content-type"));
-        String sBuff = buff.toString();
-        JsonArray arr = new JsonArray(sBuff);
-        assertEquals(expected.size(), arr.size());
-        for (Object elem: arr) {
-          assertTrue(expected.contains(elem));
-        }
-        testComplete();
-      });
-    }, 200, "OK", null);
+    testRequest(HttpMethod.GET, "/", req -> req.putHeader("accept", "application/json"), resp -> resp.bodyHandler(buff -> {
+      assertEquals("application/json", resp.headers().get("content-type"));
+      String sBuff = buff.toString();
+      JsonArray arr = new JsonArray(sBuff);
+      assertEquals(expected.size(), arr.size());
+      for (Object elem: arr) {
+        assertTrue(expected.contains(elem));
+      }
+      testComplete();
+    }), 200, "OK", null);
     await();
   }
 
@@ -478,20 +524,16 @@ public class StaticHandlerTest extends WebTestBase {
     stat.setDirectoryListing(true);
     stat.setIncludeHidden(false);
     Set<String> expected = new HashSet<>(Arrays.asList("foo.json", "a", "index.html", "otherpage.html", "somedir", "somedir2", "somedir3", "file with spaces.html"));
-    testRequest(HttpMethod.GET, "/", req -> {
-      req.putHeader("accept", "application/json");
-    }, resp -> {
-      resp.bodyHandler(buff -> {
-        assertEquals("application/json", resp.headers().get("content-type"));
-        String sBuff = buff.toString();
-        JsonArray arr = new JsonArray(sBuff);
-        assertEquals(expected.size(), arr.size());
-        for (Object elem: arr) {
-          assertTrue(expected.contains(elem));
-        }
-        testComplete();
-      });
-    }, 200, "OK", null);
+    testRequest(HttpMethod.GET, "/", req -> req.putHeader("accept", "application/json"), resp -> resp.bodyHandler(buff -> {
+      assertEquals("application/json", resp.headers().get("content-type"));
+      String sBuff = buff.toString();
+      JsonArray arr = new JsonArray(sBuff);
+      assertEquals(expected.size(), arr.size());
+      for (Object elem: arr) {
+        assertTrue(expected.contains(elem));
+      }
+      testComplete();
+    }), 200, "OK", null);
     await();
   }
 
